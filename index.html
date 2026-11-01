@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Siberian English with Gene</title>
+<style>
+:root{--bg:#f6f4ee;--card:#fffefb;--fg:#1c2421;--mut:#5c6662;--line:#d8d4c8;--brand:#1f5a43;--brand-fg:#fff;--ok:#1b6b43;--bad:#a3281f;--warn:#8a5a00;--okbg:#e3f1e8;--badbg:#f8e4e1;--warnbg:#fbf0d6}
+@media (prefers-color-scheme:dark){:root{--bg:#141917;--card:#1c2320;--fg:#ecebe5;--mut:#a3aaa6;--line:#33403b;--brand:#58c28b;--brand-fg:#0e1512;--ok:#6fd09f;--bad:#f0877e;--warn:#e3b45a;--okbg:#1d3328;--badbg:#3a2220;--warnbg:#38301a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.55 Georgia,"Times New Roman",serif}
+header{display:flex;justify-content:space-between;align-items:center;gap:.8rem;flex-wrap:wrap;padding:.8rem 1.1rem;border-bottom:1px solid var(--line);background:var(--card)}
+header .brand{font-weight:bold;font-size:1.05rem}
+header .who{font:.9rem system-ui,sans-serif;color:var(--mut)}
+main{max-width:40rem;margin:0 auto;padding:1.3rem 1.1rem 3rem}
+h2{font-size:1.3rem;margin:.2rem 0 1rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem 1.1rem;margin-bottom:.9rem}
+.sans{font-family:system-ui,sans-serif}
+.mut{color:var(--mut);font:.9rem system-ui,sans-serif}
+button{font:600 .95rem system-ui,sans-serif;padding:.6rem 1rem;border-radius:7px;border:1.5px solid var(--brand);background:var(--brand);color:var(--brand-fg);cursor:pointer}
+button.ghost{background:transparent;color:var(--fg);border-color:var(--line)}
+button.on{border-color:var(--brand);color:var(--brand)}
+button:disabled{opacity:.55;cursor:default}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--warn);outline-offset:2px}
+input,select{font:1rem system-ui,sans-serif;padding:.55rem .65rem;border:1.5px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);max-width:100%}
+.tabs{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1.1rem}
+.field{display:block;margin-bottom:.8rem}
+.field span{display:block;font:.85rem system-ui,sans-serif;color:var(--mut);margin-bottom:.2rem}
+.field input{width:100%}
+.sentence{font-size:1.2rem;line-height:2.1}
+.sentence input{width:9rem;margin:0 .2rem;text-align:center}
+.msg{padding:.7rem .9rem;border-radius:8px;margin:.8rem 0;font:.95rem system-ui,sans-serif}
+.msg.ok{background:var(--okbg);color:var(--ok)}
+.msg.bad{background:var(--badbg);color:var(--bad)}
+.msg.warn{background:var(--warnbg);color:var(--warn)}
+.row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.8rem}
+.pill{display:inline-block;font:600 .8rem system-ui,sans-serif;padding:.15rem .55rem;border-radius:99px}
+.pill.correct{background:var(--okbg);color:var(--ok)}
+.pill.partial,.pill.pending{background:var(--warnbg);color:var(--warn)}
+.pill.incorrect{background:var(--badbg);color:var(--bad)}
+textarea{width:100%;min-height:11rem;font:.85rem/1.45 ui-monospace,Menlo,Consolas,monospace;padding:.6rem;border:1.5px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg)}
+pre.code{white-space:pre-wrap;overflow-wrap:anywhere;font:.82rem/1.45 ui-monospace,Menlo,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:.7rem;max-height:16rem;overflow:auto}
+details{margin:.6rem 0}summary{cursor:pointer;font:600 .92rem system-ui,sans-serif}
+ul.plain{margin:.4rem 0;padding-left:1.2rem}
+.badge{font:.75rem system-ui,sans-serif;border:1px solid var(--line);border-radius:99px;padding:.05rem .5rem;margin-left:.4rem}
+</style>
+</head>
+<body>
+<header id="top"></header>
+<main id="app"><p class="mut">Загрузка…</p></main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script>
+// ===== Настройки (публичные значения, их можно хранить в странице) =====
+const SUPABASE_URL = "https://fhsjgpzhytkegxyoomuc.supabase.co";
+const SUPABASE_KEY = "sb_publishable_2ZZlp-D9SXhv_B1xhuAmDg_-EnPbCGQ";
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+let me = null;
+let quiz = null;
+
+// ===== Вспомогательные функции =====
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  if (props) for (const k in props) {
+    const v = props[k];
+    if (v === false || v == null) continue;
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) {
+    if (c == null || c === false) continue;
+    e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return e;
+}
+function mount(...nodes) {
+  const a = document.getElementById("app");
+  a.replaceChildren(...nodes.filter(Boolean));
+  window.scrollTo(0, 0);
+}
+function note(kind, text) { return el("div", { class: "msg " + kind, role: "status" }, text); }
+function errText(e) { return (e && e.message) ? e.message : String(e); }
+function fill(template, answers) {
+  return template.replace(/\{(\d+)\}/g, (m, n) => "[" + (answers && answers[n - 1] ? answers[n - 1] : "…") + "]");
+}
+const VERDICT = { correct: "Верно", partial: "Частично верно", incorrect: "Неверно", pending: "Проверяется преподавателем" };
+
+// ===== Вход =====
+function showLogin(mode = "signin", message = null) {
+  const email = el("input", { type: "email", autocomplete: "email", required: true });
+  const pass = el("input", { type: "password", autocomplete: mode === "signup" ? "new-password" : "current-password", required: true, minlength: 6 });
+  const name = el("input", { type: "text", autocomplete: "name" });
+  const box = el("div");
+  if (message) box.append(message);
+  const form = el("form", { class: "card" },
+    el("h2", null, mode === "signup" ? "Создать аккаунт" : "Вход"),
+    el("label", { class: "field" }, el("span", null, "Email"), email),
+    mode === "signup" ? el("label", { class: "field" }, el("span", null, "Как вас называть"), name) : null,
+    el("label", { class: "field" }, el("span", null, mode === "signup" ? "Пароль (не короче 6 символов)" : "Пароль"), pass),
+    box,
+    el("div", { class: "row" },
+      el("button", { type: "submit" }, mode === "signup" ? "Создать аккаунт" : "Войти"),
+      el("button", { type: "button", class: "ghost", onclick: () => showLogin(mode === "signup" ? "signin" : "signup") },
+        mode === "signup" ? "У меня уже есть аккаунт" : "Создать аккаунт")));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    box.replaceChildren(note("warn", "Подождите…"));
+    try {
+      if (mode === "signup") {
+        const { data, error } = await sb.auth.signUp({
+          email: email.value.trim(), password: pass.value,
+          options: { data: { display_name: name.value.trim() || null } }
+        });
+        if (error) throw error;
+        if (!data.session) { showLogin("signin", note("ok", "Аккаунт создан. Подтвердите адрес по письму на почте, затем войдите.")); return; }
+      } else {
+        const { error } = await sb.auth.signInWithPassword({ email: email.value.trim(), password: pass.value });
+        if (error) throw error;
+      }
+    } catch (e) {
+      box.replaceChildren(note("bad", "Не получилось: " + errText(e)));
+    }
+  });
+  mount(form);
+}
+
+// ===== Шапка и вкладки =====
+function renderTop() {
+  const top = document.getElementById("top");
+  top.replaceChildren(
+    el("span", { class: "brand" }, "Siberian English with Gene"),
+    me ? el("span", { class: "who" }, me.name,
+          el("span", { class: "badge" }, me.role === "teacher" ? "преподаватель" : "студент"), " ",
+          el("button", { class: "ghost", onclick: () => sb.auth.signOut() }, "Выйти")) : null);
+}
+function showHome(tab = "tasks") {
+  const tabs = [["tasks", "Задания"], ["due", "К повторению"]];
+  if (me.role === "teacher") tabs.push(["review", "Спорные ответы"], ["sets", "Наборы"]);
+  const body = el("div");
+  const nav = el("div", { class: "tabs" }, tabs.map(([id, label]) =>
+    el("button", { class: id === tab ? "on ghost" : "ghost", onclick: () => showHome(id) }, label)));
+  mount(nav, body);
+  if (tab === "tasks") tabTasks(body);
+  else if (tab === "due") tabDue(body);
+  else if (tab === "review") tabReview(body);
+  else tabSets(body);
+}
+
+// ===== Вкладка: задания =====
+async function tabTasks(box) {
+  box.append(el("h2", null, "Задания"));
+  const { data, error } = await sb.from("exercises").select("id,title,kind").eq("status", "published").order("created_at");
+  if (error) { box.append(note("bad", "Не удалось загрузить задания: " + errText(error))); return; }
+  if (!data.length) { box.append(note("warn", "Пока нет опубликованных заданий.")); return; }
+  data.forEach(x => box.append(el("div", { class: "card row", style: "justify-content:space-between;margin-top:0" },
+    el("div", null, el("strong", null, x.title), el("div", { class: "mut" }, x.kind === "grammar" ? "Grammar" : "Vocabulary")),
+    el("button", { onclick: () => startQuiz(x.id) }, "Начать"))));
+}
+
+// ===== Прохождение =====
+async function startQuiz(exerciseId) {
+  mount(el("p", { class: "mut" }, "Готовим задание…"));
+  const { data, error } = await sb.rpc("start_attempt", { p_exercise: exerciseId });
+  if (error) { mount(note("bad", "Не удалось начать: " + errText(error)), el("button", { onclick: () => showHome("tasks") }, "Назад")); return; }
+  quiz = { attempt: data.attempt_id, mode: data.show_answers, qs: data.questions, i: 0 };
+  showQuestion();
+}
+function sentenceNode(template, inputs) {
+  const parts = template.split(/\{(\d+)\}/);
+  const s = el("div", { class: "sentence" });
+  parts.forEach((p, k) => {
+    if (k % 2 === 0) s.append(p);
+    else {
+      const inp = el("input", { type: "text", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Пропуск " + p });
+      inputs[Number(p) - 1] = inp;
+      s.append(inp);
+    }
+  });
+  return s;
+}
+function showQuestion() {
+  const q = quiz.qs[quiz.i];
+  const inputs = [];
+  const sentence = sentenceNode(q.template, inputs);
+  const out = el("div");
+  const send = el("button", { type: "button" }, "Ответить");
+  send.addEventListener("click", async () => {
+    const answers = inputs.map(i => i.value.trim());
+    if (answers.some(a => !a)) { out.replaceChildren(note("warn", "Заполните все пропуски.")); return; }
+    send.disabled = true; inputs.forEach(i => i.disabled = true);
+    out.replaceChildren(note("warn", "Проверяем…"));
+    const { data, error } = await sb.rpc("submit_answer", { p_attempt: quiz.attempt, p_question: q.question_id, p_answers: answers });
+    if (error) {
+      send.disabled = false; inputs.forEach(i => i.disabled = false);
+      out.replaceChildren(note("bad", "Не удалось отправить: " + errText(error)));
+      return;
+    }
+    out.replaceChildren(...feedback(data));
+    const last = quiz.i === quiz.qs.length - 1;
+    out.append(el("div", { class: "row" }, el("button", { onclick: () => { if (last) finishQuiz(); else { quiz.i++; showQuestion(); } } }, last ? "Завершить" : "Дальше")));
+  });
+  mount(
+    el("p", { class: "mut" }, "Вопрос " + (quiz.i + 1) + " из " + quiz.qs.length),
+    el("div", { class: "card" }, el("p", { class: "mut" }, "Заполните пропуск"), sentence, el("div", { class: "row" }, send)),
+    out);
+  if (inputs[0]) inputs[0].focus();
+}
+function feedback(r) {
+  const nodes = [];
+  if (quiz.mode !== "after_question") { nodes.push(note("warn", "Ответ принят.")); return nodes; }
+  if (r.pending) { nodes.push(note("warn", "Ответ отправлен на проверку преподавателю.")); }
+  else nodes.push(note(r.verdict === "correct" ? "ok" : r.verdict === "partial" ? "warn" : "bad", VERDICT[r.verdict]));
+  if (r.expected) nodes.push(el("p", null, "Правильный ответ: ", el("strong", null, r.expected.join("  /  "))));
+  if (r.explanation) nodes.push(el("p", { class: "mut" }, r.explanation));
+  return nodes;
+}
+async function finishQuiz() {
+  mount(el("p", { class: "mut" }, "Считаем результат…"));
+  const { data, error } = await sb.rpc("finish_attempt", { p_attempt: quiz.attempt });
+  if (error) { mount(note("bad", "Не удалось завершить: " + errText(error)), el("button", { onclick: () => showHome("tasks") }, "К заданиям")); return; }
+  const items = (data.items || []).map(it => el("div", { class: "card" },
+    el("div", { class: "sentence", style: "line-height:1.6" }, fill(it.template, it.answers)),
+    el("div", { class: "row", style: "margin-top:.4rem" }, el("span", { class: "pill " + it.verdict }, VERDICT[it.verdict] || it.verdict)),
+    it.expected ? el("p", null, "Правильный ответ: ", el("strong", null, it.expected.join("  /  "))) : null,
+    it.explanation ? el("p", { class: "mut" }, it.explanation) : null));
+  mount(
+    el("h2", null, "Результат: " + data.score + " из " + data.total),
+    data.pending ? note("warn", "Ответов на проверке у преподавателя: " + data.pending + ". Итог может измениться.") : null,
+    ...items,
+    el("div", { class: "row" }, el("button", { onclick: () => showHome("tasks") }, "К заданиям")));
+}
+
+// ===== Вкладка: к повторению =====
+async function tabDue(box) {
+  box.append(el("h2", null, "К повторению сегодня"));
+  const { data, error } = await sb.rpc("due_expressions");
+  if (error) { box.append(note("bad", "Не удалось загрузить: " + errText(error))); return; }
+  if (!data.length) { box.append(note("ok", "На сегодня всё.")); return; }
+  data.forEach(x => box.append(el("div", { class: "card", style: "margin-top:0" },
+    el("strong", null, x.phrase), el("div", { class: "mut" }, "Уровень " + x.level + " из 5 · срок: " + x.next_review))));
+  box.append(el("p", { class: "mut" }, "Тренировка по этим выражениям появится на следующем этапе."));
+}
+
+// ===== Вкладка: спорные ответы (только преподаватель) =====
+async function tabReview(box) {
+  box.append(el("h2", null, "Спорные ответы"));
+  const { data, error } = await sb.from("answer_events")
+    .select("id, answers, gap_results, created_at, profiles(display_name), question_versions(template, explanation, answer_variants(is_primary, variant_parts(gap_idx, text_value)))")
+    .is("final_verdict", null).order("created_at");
+  if (error) { box.append(note("bad", "Не удалось загрузить: " + errText(error))); return; }
+  if (!data.length) { box.append(note("ok", "Спорных ответов нет.")); return; }
+  const result = el("div");
+  box.append(result);
+  data.forEach(ev => box.append(reviewCard(ev, result)));
+}
+function reviewCard(ev, result) {
+  const v = ev.question_versions || {};
+  const variants = v.answer_variants || [];
+  const main = variants.find(x => x.is_primary) || variants[0];
+  const expected = main ? main.variant_parts.slice().sort((a, b) => a.gap_idx - b.gap_idx).map(p => p.text_value) : [];
+  const reason = el("select", null,
+    ["Допустимый альтернативный ответ", "Опечатка", "Ответ зависит от контекста", "Ошибка в ключе", "Другая причина"]
+      .map(t => el("option", { value: t }, t)));
+  const comment = el("input", { type: "text", placeholder: "Комментарий студенту (необязательно)", style: "width:100%;margin-top:.5rem" });
+  const msg = el("div");
+  const card = el("div", { class: "card" });
+  async function decide(verdict, btns) {
+    btns.forEach(b => b.disabled = true);
+    const { data, error } = await sb.rpc("review_answer", {
+      p_event: ev.id, p_verdict: verdict, p_reason: reason.value, p_comment: comment.value.trim() || null });
+    if (error) { btns.forEach(b => b.disabled = false); msg.replaceChildren(note("bad", "Не удалось сохранить: " + errText(error))); return; }
+    const b = data.repetition_before, a = data.repetition_after;
+    let text = "Решение сохранено: " + VERDICT[verdict] + ".";
+    if (a) text += " Повторение: " + (b ? "уровень " + b.level + ", " + b.next_review : "новое") + " → уровень " + a.level + ", " + a.next_review + ".";
+    card.replaceChildren(note("ok", text));
+  }
+  const btns = [
+    el("button", { type: "button" }, "Засчитать"),
+    el("button", { type: "button", class: "ghost" }, "Частично"),
+    el("button", { type: "button", class: "ghost" }, "Не засчитывать")];
+  ["correct", "partial", "incorrect"].forEach((vd, i) => btns[i].addEventListener("click", () => decide(vd, btns)));
+  card.append(
+    el("div", { class: "mut" }, (ev.profiles && ev.profiles.display_name) || "Студент"),
+    el("div", { class: "sentence", style: "line-height:1.6;margin:.3rem 0" }, fill(v.template || "", ev.answers)),
+    el("div", null, "Ответ студента: ", el("strong", null, (ev.answers || []).join("  /  "))),
+    el("div", null, "Ожидалось: ", el("strong", null, expected.join("  /  "))),
+    el("div", { class: "mut" }, "Автопроверка: " + (ev.gap_results || []).map(g => g.status).join(", ")),
+    el("div", { class: "row" }, reason), comment,
+    el("div", { class: "row" }, btns), msg);
+  return card;
+}
+
+
+// ===== Вкладка: наборы (только преподаватель) =====
+const CLAUDE_PROMPT = `Составь набор упражнений на заполнение пропусков и верни ТОЛЬКО JSON в одном блоке кода, без пояснений.
+Формат:
+{
+  "title": "Название набора",
+  "kind": "vocabulary",            // или "grammar"
+  "show_answers": "after_attempt", // never | after_question | after_attempt
+  "shuffle": true,
+  "questions": [
+    {
+      "expression": "throw someone off",   // целевое выражение (для расписания повторений)
+      "meaning": "сбить с толку",
+      "level": "B2",
+      "template": "The news really {1} me {2}.",   // пропуски {1}, {2} по порядку
+      "gaps": ["verb", "particle"],                // необязательно
+      "answers": [["threw", "off"], ["has thrown", "off"]],  // первый вариант основной
+      "explanation": "Короткое объяснение по-русски."
+    },
+    {
+      "expression": "drag on",
+      "template": "I didn't expect the meeting to {1} so long.",
+      "answers": ["drag on"],                      // для одного пропуска можно просто строки
+      "explanation": "drag on: затягиваться."
+    }
+  ]
+}
+Правила: только прямые кавычки; в каждом варианте ровно столько слов, сколько пропусков; ответы строго одной формы, без скобок и косых черт.
+Вот слова и тема набора:
+`;
+
+function parseSet(text) {
+  const t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+  try { return JSON.parse(t); } catch (e1) {
+    try { return JSON.parse(t.replace(/[“”„]/g, '"').replace(/[‘’]/g, "'")); }
+    catch (e2) { throw new Error("Не удалось прочитать текст. Скопируйте весь блок целиком, кавычки должны быть прямыми (\")."); }
+  }
+}
+function validateSet(o) {
+  const errors = [], warnings = [];
+  if (!o || typeof o !== "object" || Array.isArray(o)) return { errors: ["Ожидался объект с полями title и questions."], warnings };
+  if (!String(o.title || "").trim()) errors.push("Нет названия набора (title).");
+  if (o.kind && !["grammar", "vocabulary"].includes(o.kind)) errors.push("kind: допустимо grammar или vocabulary.");
+  if (o.show_answers && !["never", "after_question", "after_attempt"].includes(o.show_answers)) errors.push("show_answers: допустимо never, after_question или after_attempt.");
+  if (!Array.isArray(o.questions) || !o.questions.length) { errors.push("В наборе нет вопросов (questions)."); return { errors, warnings }; }
+  o.questions.forEach((q, i) => {
+    const n = i + 1;
+    const tpl = String((q && q.template) || "");
+    const slots = [...tpl.matchAll(/\{(\d+)\}/g)].map(m => Number(m[1]));
+    const uniq = new Set(slots);
+    if (!tpl.trim()) { errors.push("Вопрос " + n + ": нет текста (template)."); return; }
+    if (!slots.length) { errors.push("Вопрос " + n + ": в тексте нет пропусков {1}."); return; }
+    if (slots.length !== uniq.size || Math.max(...slots) !== uniq.size) { errors.push("Вопрос " + n + ": пропуски должны идти по порядку {1}, {2}… без повторов."); return; }
+    const need = uniq.size;
+    if (!Array.isArray(q.answers) || !q.answers.length) { errors.push("Вопрос " + n + ": нет правильных ответов (answers)."); return; }
+    q.answers.forEach((v, k) => {
+      const arr = typeof v === "string" ? [v] : v;
+      if (!Array.isArray(arr) || arr.length !== need) errors.push("Вопрос " + n + ": вариант ответа " + (k + 1) + " должен содержать ровно " + need + " слов(а).");
+      else if (arr.some(x => typeof x !== "string" || !x.trim())) errors.push("Вопрос " + n + ": пустой ответ в варианте " + (k + 1) + ".");
+    });
+    if (!String(q.expression || "").trim()) warnings.push("Вопрос " + n + ": нет целевого выражения (expression), повторения для него считаться не будут.");
+    if (!String(q.explanation || "").trim()) warnings.push("Вопрос " + n + ": нет объяснения.");
+  });
+  return { errors, warnings };
+}
+function previewSet(o) {
+  return o.questions.map((q, i) => {
+    const first = Array.isArray(q.answers[0]) ? q.answers[0] : [q.answers[0]];
+    return el("li", null, fill(String(q.template), first),
+      q.answers.length > 1 ? el("span", { class: "mut" }, "  (+" + (q.answers.length - 1) + " доп. вариант.)") : null);
+  });
+}
+async function copyText(text, btn) {
+  try { await navigator.clipboard.writeText(text); btn.textContent = "Скопировано"; }
+  catch (e) { btn.textContent = "Выделите текст и скопируйте вручную"; }
+  setTimeout(() => { btn.textContent = "Скопировать подсказку"; }, 2000);
+}
+async function tabSets(box) {
+  box.append(el("h2", null, "Наборы"));
+
+  // --- импорт ---
+  const ta = el("textarea", { placeholder: "Вставьте сюда JSON с набором вопросов", "aria-label": "JSON набора" });
+  const out = el("div");
+  const copyBtn = el("button", { type: "button", class: "ghost" }, "Скопировать подсказку");
+  copyBtn.addEventListener("click", () => copyText(CLAUDE_PROMPT, copyBtn));
+  const checkBtn = el("button", { type: "button" }, "Проверить");
+  checkBtn.addEventListener("click", () => {
+    let obj;
+    try { obj = parseSet(ta.value); } catch (e) { out.replaceChildren(note("bad", errText(e))); return; }
+    const { errors, warnings } = validateSet(obj);
+    if (errors.length) {
+      out.replaceChildren(note("bad", "Нужно исправить:"), el("ul", { class: "plain" }, errors.map(x => el("li", null, x))));
+      return;
+    }
+    const save = el("button", { type: "button" }, "Сохранить как черновик");
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      const { data, error } = await sb.rpc("import_exercise", { p: obj });
+      if (error) { save.disabled = false; out.append(note("bad", "Не удалось сохранить: " + errText(error))); return; }
+      ta.value = "";
+      out.replaceChildren(note("ok", "Сохранено как черновик: «" + obj.title + "», вопросов: " + data.questions + "."));
+      loadList();
+    });
+    out.replaceChildren(
+      note("ok", "Набор «" + obj.title + "»: вопросов " + obj.questions.length + ". Ошибок нет."),
+      warnings.length ? note("warn", "Предупреждения:") : null,
+      warnings.length ? el("ul", { class: "plain" }, warnings.map(x => el("li", null, x))) : null,
+      el("p", { class: "mut" }, "Так будут выглядеть вопросы (в скобках основной ответ):"),
+      el("ol", { class: "plain" }, previewSet(obj)),
+      el("div", { class: "row" }, save));
+  });
+  box.append(el("div", { class: "card" },
+    el("strong", null, "Импорт набора"),
+    el("details", null, el("summary", null, "Как получить набор от Claude"),
+      el("p", { class: "mut" }, "Скопируйте подсказку, вставьте в чат вместе со своими словами, затем скопируйте блок JSON из ответа и вставьте ниже."),
+      el("pre", { class: "code" }, CLAUDE_PROMPT), copyBtn),
+    ta, el("div", { class: "row" }, checkBtn), out));
+
+  // --- список наборов ---
+  const listBox = el("div");
+  box.append(el("h2", { style: "margin-top:1.6rem" }, "Все наборы"), listBox);
+  async function loadList() {
+    const { data, error } = await sb.from("exercises").select("id,title,status,questions(count)").order("created_at", { ascending: false });
+    if (error) { listBox.replaceChildren(note("bad", "Не удалось загрузить: " + errText(error))); return; }
+    if (!data.length) { listBox.replaceChildren(note("warn", "Наборов пока нет.")); return; }
+    listBox.replaceChildren(...data.map(x => setCard(x, loadList)));
+  }
+  loadList();
+}
+function setCard(x, reload) {
+  const count = x.questions && x.questions[0] ? x.questions[0].count : 0;
+  const pub = x.status === "published";
+  const msg = el("div");
+  const btns = [el("button", { type: "button", class: "ghost" }, "Пройти как студент")];
+  btns[0].addEventListener("click", () => startQuiz(x.id));
+  const act = el("button", { type: "button" }, pub ? "Снять с публикации" : "Опубликовать");
+  if (pub) act.className = "ghost";
+  act.addEventListener("click", async () => {
+    act.disabled = true;
+    if (pub) {
+      const { error } = await sb.from("exercises").update({ status: "draft" }).eq("id", x.id);
+      if (error) { act.disabled = false; msg.replaceChildren(note("bad", errText(error))); return; }
+      reload();
+    } else {
+      const { data, error } = await sb.rpc("publish_exercise", { p_exercise: x.id });
+      if (error) { act.disabled = false; msg.replaceChildren(note("bad", errText(error))); return; }
+      if (!data.ok) {
+        act.disabled = false;
+        msg.replaceChildren(note("bad", "Публикация заблокирована:"), el("ul", { class: "plain" }, data.problems.map(p => el("li", null, p))));
+        return;
+      }
+      reload();
+    }
+  });
+  btns.push(act);
+  return el("div", { class: "card" },
+    el("strong", null, x.title), " ",
+    el("span", { class: "pill " + (pub ? "correct" : "pending") }, pub ? "Опубликовано" : "Черновик"),
+    el("div", { class: "mut" }, "Вопросов: " + count),
+    el("div", { class: "row" }, btns), msg);
+}
+
+// ===== Запуск =====
+let lastUid;
+sb.auth.onAuthStateChange((event, session) => {
+  const uid = session && session.user ? session.user.id : null;
+  if (uid === lastUid) return;           // не перезапускать при возврате на вкладку
+  lastUid = uid;
+  setTimeout(boot, 0);
+});
+async function boot() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) { me = null; quiz = null; renderTop(); showLogin(); return; }
+  const { data: p } = await sb.from("profiles").select("display_name, role").eq("id", session.user.id).single();
+  me = { id: session.user.id, name: (p && p.display_name) || session.user.email, role: (p && p.role) || "student" };
+  renderTop();
+  showHome("tasks");
+}
+</script>
+</body>
+</html>
