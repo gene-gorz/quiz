@@ -56,6 +56,11 @@ const SUPABASE_URL = "https://fhsjgpzhytkegxyoomuc.supabase.co";
 const SUPABASE_KEY = "sb_publishable_2ZZlp-D9SXhv_B1xhuAmDg_-EnPbCGQ";
 
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+// Пустые значения (null/false) не должны выводиться как текст "null"
+const _replaceChildren = Element.prototype.replaceChildren;
+Element.prototype.replaceChildren = function (...nodes) {
+  return _replaceChildren.apply(this, nodes.filter(n => n != null && n !== false));
+};
 let me = null;
 let quiz = null;
 
