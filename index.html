@@ -90,6 +90,7 @@ function errText(e) { return (e && e.message) ? e.message : String(e); }
 function fill(template, answers) {
   return template.replace(/\{(\d+)\}/g, (m, n) => "[" + (answers && answers[n - 1] ? answers[n - 1] : "…") + "]");
 }
+function fmtDate(iso) { return iso ? String(iso).split("-").reverse().join(".") : ""; }
 const VERDICT = { correct: "Верно", partial: "Частично верно", incorrect: "Неверно", pending: "Проверяется преподавателем" };
 
 // ===== Вход =====
@@ -169,7 +170,7 @@ async function startQuiz(exerciseId) {
   mount(el("p", { class: "mut" }, "Готовим задание…"));
   const { data, error } = await sb.rpc("start_attempt", { p_exercise: exerciseId });
   if (error) { mount(note("bad", "Не удалось начать: " + errText(error)), el("button", { onclick: () => showHome("tasks") }, "Назад")); return; }
-  quiz = { attempt: data.attempt_id, mode: data.show_answers, qs: data.questions, i: 0 };
+  quiz = { attempt: data.attempt_id, mode: data.show_answers, qs: data.questions, i: 0, back: "tasks" };
   showQuestion();
 }
 function sentenceNode(template, inputs) {
@@ -207,7 +208,7 @@ function showQuestion() {
     out.append(el("div", { class: "row" }, el("button", { onclick: () => { if (last) finishQuiz(); else { quiz.i++; showQuestion(); } } }, last ? "Завершить" : "Дальше")));
   });
   mount(
-    el("p", { class: "mut" }, "Вопрос " + (quiz.i + 1) + " из " + quiz.qs.length),
+    el("p", { class: "mut" }, (quiz.back === "due" ? "Повторение · вопрос " : "Вопрос ") + (quiz.i + 1) + " из " + quiz.qs.length),
     el("div", { class: "card" }, el("p", { class: "mut" }, "Заполните пропуск"), sentence, el("div", { class: "row" }, send)),
     out);
   if (inputs[0]) inputs[0].focus();
@@ -219,6 +220,7 @@ function feedback(r) {
   else nodes.push(note(r.verdict === "correct" ? "ok" : r.verdict === "partial" ? "warn" : "bad", VERDICT[r.verdict]));
   if (r.expected) nodes.push(el("p", null, "Правильный ответ: ", el("strong", null, r.expected.join("  /  "))));
   if (r.explanation) nodes.push(el("p", { class: "mut" }, r.explanation));
+  if (r.next_review && !r.pending) nodes.push(el("p", { class: "mut" }, "Следующее повторение: " + fmtDate(r.next_review)));
   return nodes;
 }
 async function finishQuiz() {
@@ -234,7 +236,7 @@ async function finishQuiz() {
     el("h2", null, "Результат: " + data.score + " из " + data.total),
     data.pending ? note("warn", "Ответов на проверке у преподавателя: " + data.pending + ". Итог может измениться.") : null,
     ...items,
-    el("div", { class: "row" }, el("button", { onclick: () => showHome("tasks") }, "К заданиям")));
+    el("div", { class: "row" }, el("button", { onclick: () => showHome(quiz.back || "tasks") }, quiz.back === "due" ? "К повторению" : "К заданиям")));
 }
 
 // ===== Вкладка: к повторению =====
@@ -243,9 +245,24 @@ async function tabDue(box) {
   const { data, error } = await sb.rpc("due_expressions");
   if (error) { box.append(note("bad", "Не удалось загрузить: " + errText(error))); return; }
   if (!data.length) { box.append(note("ok", "На сегодня всё.")); return; }
+  box.append(el("div", { class: "row", style: "margin:0 0 1rem" },
+    el("button", { type: "button", onclick: startReview }, "Начать повторение (" + data.length + ")")));
   data.forEach(x => box.append(el("div", { class: "card", style: "margin-top:0" },
-    el("strong", null, x.phrase), el("div", { class: "mut" }, "Уровень " + x.level + " из 5 · срок: " + x.next_review))));
-  box.append(el("p", { class: "mut" }, "Тренировка по этим выражениям появится на следующем этапе."));
+    el("strong", null, x.phrase), el("div", { class: "mut" }, "Уровень " + x.level + " из 5 · срок: " + fmtDate(x.next_review)))));
+}
+async function startReview() {
+  mount(el("p", { class: "mut" }, "Готовим повторение…"));
+  const { data, error } = await sb.rpc("start_review");
+  if (error) { mount(note("bad", "Не удалось начать: " + errText(error)), el("button", { onclick: () => showHome("due") }, "Назад")); return; }
+  if (!data.questions.length) {
+    mount(note("warn", data.skipped
+        ? "Для выражений, которые пора повторить, пока нет опубликованных вопросов. Сообщите преподавателю."
+        : "На сегодня повторять нечего."),
+      el("button", { onclick: () => showHome("due") }, "Назад"));
+    return;
+  }
+  quiz = { attempt: data.attempt_id, mode: "after_question", qs: data.questions, i: 0, back: "due" };
+  showQuestion();
 }
 
 // ===== Вкладка: спорные ответы (только преподаватель) =====
