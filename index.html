@@ -42,6 +42,14 @@ textarea{width:100%;min-height:11rem;font:.85rem/1.45 ui-monospace,Menlo,Consola
 pre.code{white-space:pre-wrap;overflow-wrap:anywhere;font:.82rem/1.45 ui-monospace,Menlo,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:.7rem;max-height:16rem;overflow:auto}
 details{margin:.6rem 0}summary{cursor:pointer;font:600 .92rem system-ui,sans-serif}
 ul.plain{margin:.4rem 0;padding-left:1.2rem}
+table{border-collapse:collapse;width:100%;font:.88rem/1.35 system-ui,sans-serif}
+th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mut);font-weight:600}
+.scroll{overflow-x:auto}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr));gap:.6rem;margin-bottom:1.1rem}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.7rem .8rem}
+.kpi b{display:block;font:700 1.5rem system-ui,sans-serif}
+.kpi span{font:.8rem system-ui,sans-serif;color:var(--mut)}
 .badge{font:.75rem system-ui,sans-serif;border:1px solid var(--line);border-radius:99px;padding:.05rem .5rem;margin-left:.4rem}
 </style>
 </head>
@@ -143,7 +151,7 @@ function renderTop() {
 }
 function showHome(tab = "tasks") {
   const tabs = [["tasks", "Задания"], ["due", "К повторению"]];
-  if (me.role === "teacher") tabs.push(["review", "Спорные ответы"], ["sets", "Наборы"]);
+  if (me.role === "teacher") tabs.push(["review", "Спорные ответы"], ["sets", "Наборы"], ["stats", "Статистика"]);
   const body = el("div");
   const nav = el("div", { class: "tabs" }, tabs.map(([id, label]) =>
     el("button", { class: id === tab ? "on ghost" : "ghost", onclick: () => showHome(id) }, label)));
@@ -151,7 +159,8 @@ function showHome(tab = "tasks") {
   if (tab === "tasks") tabTasks(body);
   else if (tab === "due") tabDue(body);
   else if (tab === "review") tabReview(body);
-  else tabSets(body);
+  else if (tab === "sets") tabSets(body);
+  else tabStats(body);
 }
 
 // ===== Вкладка: задания =====
@@ -474,6 +483,78 @@ function setCard(x, reload) {
     el("span", { class: "pill " + (pub ? "correct" : "pending") }, pub ? "Опубликовано" : "Черновик"),
     el("div", { class: "mut" }, "Вопросов: " + count),
     el("div", { class: "row" }, btns), msg);
+}
+
+
+// ===== Вкладка: статистика (только преподаватель) =====
+function ago(iso) {
+  if (!iso) return { text: "не начинал", days: null };
+  const d = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  return { text: d <= 0 ? "сегодня" : d === 1 ? "вчера" : d + " дн. назад", days: d };
+}
+function kpi(value, label) { return el("div", { class: "kpi" }, el("b", null, String(value)), el("span", null, label)); }
+async function tabStats(box) {
+  box.append(el("h2", null, "Статистика"));
+  const body = el("div", null, el("p", { class: "mut" }, "Загрузка…"));
+  box.append(body);
+  const [ov, st, qs] = await Promise.all([
+    sb.rpc("stats_overview"), sb.rpc("stats_students"), sb.rpc("stats_questions", { p_min: 3 })]);
+  const err = ov.error || st.error || qs.error;
+  if (err) { body.replaceChildren(note("bad", "Не удалось загрузить: " + errText(err))); return; }
+  const o = ov.data, students = st.data, questions = qs.data;
+
+  const parts = [];
+  parts.push(el("div", { class: "kpis" },
+    kpi(o.students, "студентов"),
+    kpi(o.active_7d + " из " + o.students, "занимались за 7 дней"),
+    kpi(o.answers_7d, "ответов за 7 дней"),
+    kpi(o.accuracy_7d == null ? "—" : o.accuracy_7d + "%", "верных за 7 дней"),
+    kpi(o.pending, "ждут вашей проверки")));
+  if (o.pending > 0) parts.push(note("warn", "Есть ответы, ожидающие проверки: откройте вкладку «Спорные ответы»."));
+
+  parts.push(el("h2", { style: "margin-top:1.4rem" }, "Студенты"));
+  if (!students.length) parts.push(note("warn", "Пока нет зарегистрированных студентов."));
+  else {
+    const rows = students.map(x => {
+      const a = ago(x.last_active);
+      const stale = a.days !== null && a.days >= 7;
+      return el("tr", null,
+        el("td", null, el("strong", null, x.name)),
+        el("td", null, a.text, stale ? el("span", { class: "pill pending", style: "margin-left:.4rem" }, "давно") : null),
+        el("td", null, x.answers_7d + " / " + x.answers_total),
+        el("td", null, x.accuracy == null ? "—" : x.accuracy + "%"),
+        el("td", null, String(x.mastered)),
+        el("td", null, String(x.learning)),
+        el("td", null, x.overdue > 0 ? el("span", { class: "pill incorrect" }, String(x.overdue)) : "0"));
+    });
+    parts.push(el("div", { class: "card scroll", style: "padding:.3rem" },
+      el("table", null,
+        el("thead", null, el("tr", null, ["Студент", "Последняя активность", "Ответов (7 дн. / всего)", "Верно", "Освоено", "В работе", "Просрочено"].map(h => el("th", null, h)))),
+        el("tbody", null, rows))),
+      el("p", { class: "mut" }, "«Освоено» — выражения на уровне 4–5, «В работе» — ниже 4, «Просрочено» — срок повторения уже прошёл."));
+  }
+
+  parts.push(el("h2", { style: "margin-top:1.4rem" }, "Вопросы, которые чаще всего проваливают"));
+  if (!questions.length) parts.push(note("warn", "Пока мало данных: вопрос появится здесь, когда на него ответят не меньше 3 раз."));
+  else {
+    questions.slice(0, 10).forEach(q => {
+      const top = q.wrong_top || [];
+      const same = top.length && top[0].n >= 3 && top[0].n >= q.answers * 0.5;
+      const exp = q.expected ? q.expected.split(" / ") : [];
+      parts.push(el("div", { class: "card" },
+        el("div", { class: "mut" }, q.exercise),
+        el("div", { class: "sentence", style: "line-height:1.6;margin:.2rem 0" }, fill(q.template, exp)),
+        el("div", null, el("span", { class: "pill " + (q.accuracy == null ? "pending" : q.accuracy < 50 ? "incorrect" : q.accuracy < 80 ? "partial" : "correct") },
+          q.accuracy == null ? "нет оценок" : "верно " + q.accuracy + "%"),
+          el("span", { class: "mut" }, "  ответов: " + q.answers + (q.pending ? ", на проверке: " + q.pending : ""))),
+        top.length ? el("p", { class: "mut", style: "margin:.5rem 0 0" }, "Частые ошибки: " + top.map(w => w.answer + " ×" + w.n).join("; ")) : null,
+        same ? note("warn", "Многие ошиблись одинаково. Проверьте, нет ли у вопроса другого допустимого ответа или двусмысленности.") : null));
+    });
+    parts.push(el("p", { class: "mut" }, "Показаны вопросы, на которые ответили не менее 3 раз; сверху самые трудные. Ваши пробные прохождения не учитываются."));
+  }
+  const refresh = el("button", { type: "button", class: "ghost", onclick: () => showHome("stats") }, "Обновить");
+  parts.push(el("div", { class: "row" }, refresh));
+  body.replaceChildren(...parts);
 }
 
 // ===== Запуск =====
