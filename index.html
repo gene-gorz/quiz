@@ -150,6 +150,7 @@ function renderTop() {
           el("button", { class: "ghost", onclick: () => sb.auth.signOut() }, "Выйти")) : null);
 }
 function showHome(tab = "tasks") {
+  document.getElementById("app").style.maxWidth = tab === "stats" ? "62rem" : "";
   const tabs = [["tasks", "Задания"], ["due", "К повторению"]];
   if (me.role === "teacher") tabs.push(["review", "Спорные ответы"], ["sets", "Наборы"], ["stats", "Статистика"]);
   const body = el("div");
@@ -566,6 +567,7 @@ sb.auth.onAuthStateChange((event, session) => {
   setTimeout(boot, 0);
 });
 async function boot() {
+  document.getElementById("app").style.maxWidth = "";
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { me = null; quiz = null; renderTop(); showLogin(); return; }
   const { data: p } = await sb.from("profiles").select("display_name, role").eq("id", session.user.id).single();
