@@ -152,7 +152,7 @@ function renderTop() {
 function showHome(tab = "tasks") {
   document.getElementById("app").style.maxWidth = tab === "stats" ? "62rem" : "";
   const tabs = [["tasks", "Задания"], ["due", "К повторению"]];
-  if (me.role === "teacher") tabs.push(["review", "Спорные ответы"], ["sets", "Наборы"], ["stats", "Статистика"]);
+  if (me.role === "teacher") tabs.push(["review", "Спорные ответы"], ["sets", "Наборы"], ["stats", "Статистика"], ["log", "Журнал"]);
   const body = el("div");
   const nav = el("div", { class: "tabs" }, tabs.map(([id, label]) =>
     el("button", { class: id === tab ? "on ghost" : "ghost", onclick: () => showHome(id) }, label)));
@@ -161,7 +161,8 @@ function showHome(tab = "tasks") {
   else if (tab === "due") tabDue(body);
   else if (tab === "review") tabReview(body);
   else if (tab === "sets") tabSets(body);
-  else tabStats(body);
+  else if (tab === "stats") tabStats(body);
+  else tabLog(body);
 }
 
 // ===== Вкладка: задания =====
@@ -457,7 +458,8 @@ function setCard(x, reload) {
   const count = x.questions && x.questions[0] ? x.questions[0].count : 0;
   const pub = x.status === "published";
   const msg = el("div");
-  const btns = [el("button", { type: "button", class: "ghost" }, "Пройти как студент")];
+  const btns = [el("button", { type: "button", class: "ghost" }, "Пройти как студент"),
+    el("button", { type: "button", class: "ghost", onclick: () => showSetEditor(x.id, x.title, pub) }, "Редактировать")];
   btns[0].addEventListener("click", () => startQuiz(x.id));
   const act = el("button", { type: "button" }, pub ? "Снять с публикации" : "Опубликовать");
   if (pub) act.className = "ghost";
@@ -556,6 +558,146 @@ async function tabStats(box) {
   const refresh = el("button", { type: "button", class: "ghost", onclick: () => showHome("stats") }, "Обновить");
   parts.push(el("div", { class: "row" }, refresh));
   body.replaceChildren(...parts);
+}
+
+
+// ===== Редактор вопросов (только преподаватель) =====
+const ORIGIN = { generated: "создана при импорте", teacher_edited: "правка преподавателя", approved: "подтверждена", regeneration_candidate: "вариант ИИ" };
+const blank = t => String(t).replace(/\{\d+\}/g, "___");
+
+async function showSetEditor(exId, title, published) {
+  mount(el("p", { class: "mut" }, "Загрузка…"));
+  const { data, error } = await sb.from("questions")
+    .select("id, position, expressions(phrase, meaning), cur:question_versions!questions_current_version_fk(id, version_no, template)")
+    .eq("exercise_id", exId).order("position");
+  if (error) { mount(note("bad", "Не удалось загрузить: " + errText(error)), el("button", { onclick: () => showHome("sets") }, "Назад")); return; }
+  const list = data.length ? data.map((q, i) => el("div", { class: "card" },
+      el("div", { class: "sentence", style: "line-height:1.6" }, (i + 1) + ". " + (q.cur ? blank(q.cur.template) : "(нет версии)")),
+      el("div", { class: "mut" }, (q.expressions ? q.expressions.phrase + " · " : "") + "версия " + (q.cur ? q.cur.version_no : "—")),
+      el("div", { class: "row" },
+        el("button", { type: "button", onclick: () => showQuestionForm(exId, title, published, q) }, "Править"),
+        el("button", { type: "button", class: "ghost", onclick: () => showHistory(exId, title, published, q) }, "История версий"))))
+    : [note("warn", "В наборе пока нет вопросов.")];
+  mount(
+    el("div", { class: "row", style: "margin:0 0 .8rem" },
+      el("button", { type: "button", class: "ghost", onclick: () => showHome("sets") }, "← К наборам"),
+      el("button", { type: "button", onclick: () => showQuestionForm(exId, title, published, null) }, "Добавить вопрос")),
+    el("h2", null, title),
+    published ? note("warn", "Набор опубликован. Правка создаёт новую версию: новые попытки студентов увидят её сразу, а уже начатые попытки и прежние ответы не меняются.") : null,
+    ...list);
+}
+
+async function showQuestionForm(exId, title, published, q) {
+  const isNew = !q;
+  let ver = null;
+  if (!isNew) {
+    mount(el("p", { class: "mut" }, "Загрузка…"));
+    const r = await sb.from("question_versions")
+      .select("id, template, explanation, gaps(idx, role), answer_variants(is_primary, variant_parts(gap_idx, text_value))")
+      .eq("id", q.cur.id).single();
+    if (r.error) { mount(note("bad", "Не удалось загрузить вопрос: " + errText(r.error)), el("button", { onclick: () => showSetEditor(exId, title, published) }, "Назад")); return; }
+    ver = r.data;
+  }
+  const variants = ver ? ver.answer_variants.slice().sort((a, b) => (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0)) : [];
+  const answerLines = variants.map(v => v.variant_parts.slice().sort((a, b) => a.gap_idx - b.gap_idx).map(p => p.text_value).join(" | ")).join("\n");
+
+  const tpl = el("textarea", { style: "min-height:5rem" }); tpl.value = ver ? ver.template : "";
+  const ans = el("textarea", { style: "min-height:5rem" }); ans.value = answerLines;
+  const expl = el("textarea", { style: "min-height:4rem" }); expl.value = ver && ver.explanation ? ver.explanation : "";
+  const expr = el("input", { type: "text" }); expr.value = q && q.expressions ? q.expressions.phrase : "";
+  const mean = el("input", { type: "text" }); mean.value = q && q.expressions && q.expressions.meaning ? q.expressions.meaning : "";
+  const hint = el("div", { class: "mut" });
+  const msg = el("div");
+  const gapCount = () => new Set([...tpl.value.matchAll(/\{(\d+)\}/g)].map(m => m[1])).size;
+  const upd = () => { const n = gapCount(); hint.textContent = n ? "Пропусков в тексте: " + n + (n > 1 ? ". В каждой строке ответов нужно " + n + " слова через знак |, например: threw | off" : ". В каждой строке один ответ.") : "Добавьте в текст пропуск {1}."; };
+  tpl.addEventListener("input", upd); upd();
+
+  const save = el("button", { type: "button" }, isNew ? "Добавить вопрос" : "Сохранить как новую версию");
+  save.addEventListener("click", async () => {
+    const lines = ans.value.split("\n").map(x => x.trim()).filter(Boolean);
+    const n = gapCount();
+    const answers = lines.map(l => l.split("|").map(x => x.trim()));
+    const chk = validateSet({ title: "x", questions: [{ template: tpl.value, answers: answers.map(a => n === 1 ? a[0] : a), expression: "x", explanation: "x" }] });
+    if (chk.errors.length) { msg.replaceChildren(note("bad", "Нужно исправить:"), el("ul", { class: "plain" }, chk.errors.map(e => el("li", null, e.replace(/^Вопрос 1: /, ""))))); return; }
+    save.disabled = true;
+    let gaps = null;
+    if (ver && ver.gaps && ver.gaps.length === n) gaps = ver.gaps.slice().sort((a, b) => a.idx - b.idx).map(g => g.role || "");
+    const { error } = await sb.rpc("save_question_version", {
+      p_question: isNew ? null : q.id, p_exercise: exId, p_template: tpl.value, p_explanation: expl.value,
+      p_answers: answers, p_gaps: gaps, p_expression: expr.value, p_meaning: mean.value });
+    if (error) { save.disabled = false; msg.replaceChildren(note("bad", "Не удалось сохранить: " + errText(error))); return; }
+    showSetEditor(exId, title, published);
+  });
+  const field = (label, node, extra) => el("label", { class: "field" }, el("span", null, label), node, extra || null);
+  mount(
+    el("h2", null, isNew ? "Новый вопрос" : "Правка вопроса"),
+    el("div", { class: "card" },
+      field("Текст вопроса (пропуски: {1}, {2}…)", tpl, hint),
+      field("Правильные ответы: по одному варианту в строке, первая строка основная", ans),
+      field("Целевое выражение (для расписания повторений)", expr),
+      field("Значение (необязательно)", mean),
+      field("Объяснение (необязательно)", expl),
+      isNew ? null : note("warn", "Сохранение создаёт новую версию. Прежняя останется в истории, её можно вернуть."),
+      msg,
+      el("div", { class: "row" }, save, el("button", { type: "button", class: "ghost", onclick: () => showSetEditor(exId, title, published) }, "Отмена"))));
+}
+
+async function showHistory(exId, title, published, q) {
+  mount(el("p", { class: "mut" }, "Загрузка…"));
+  const [vs, cur] = await Promise.all([
+    sb.from("question_versions").select("id, version_no, template, explanation, origin, created_at").eq("question_id", q.id).order("version_no", { ascending: false }),
+    sb.from("questions").select("current_version_id").eq("id", q.id).single()]);
+  if (vs.error || cur.error) { mount(note("bad", "Не удалось загрузить: " + errText(vs.error || cur.error)), el("button", { onclick: () => showSetEditor(exId, title, published) }, "Назад")); return; }
+  const curId = cur.data.current_version_id;
+  const msg = el("div");
+  const cards = vs.data.map(v => {
+    const isCur = v.id === curId;
+    const b = el("button", { type: "button", class: "ghost" }, "Сделать текущей");
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      const { error } = await sb.rpc("restore_question_version", { p_version: v.id });
+      if (error) { b.disabled = false; msg.replaceChildren(note("bad", errText(error))); return; }
+      showHistory(exId, title, published, q);
+    });
+    return el("div", { class: "card" },
+      el("div", null, el("strong", null, "Версия " + v.version_no), " ",
+        isCur ? el("span", { class: "pill correct" }, "текущая") : null,
+        el("span", { class: "mut" }, "  " + (ORIGIN[v.origin] || v.origin) + " · " + new Date(v.created_at).toLocaleString("ru-RU"))),
+      el("div", { class: "sentence", style: "line-height:1.6" }, blank(v.template)),
+      v.explanation ? el("div", { class: "mut" }, v.explanation) : null,
+      isCur ? null : el("div", { class: "row" }, b));
+  });
+  mount(
+    el("div", { class: "row", style: "margin:0 0 .8rem" }, el("button", { type: "button", class: "ghost", onclick: () => showSetEditor(exId, title, published) }, "← К вопросам")),
+    el("h2", null, "История версий"),
+    msg, ...cards);
+}
+
+// ===== Вкладка: журнал изменений (только преподаватель) =====
+function describeLog(l) {
+  const a = l.after || {}, b = l.before || {};
+  switch (l.action) {
+    case "publish": return "Опубликован набор";
+    case "import": return "Импортирован набор «" + (a.title || "") + "», вопросов: " + (a.questions || "?");
+    case "review": return "Решение по ответу студента: " + (b.verdict ? VERDICT[b.verdict] : "ожидал решения") + " → " + (VERDICT[a.verdict] || a.verdict) + (l.reason ? " (" + l.reason + ")" : "");
+    case "edit_question": return "Изменён вопрос, версия " + a.version_no + ": " + blank(a.template || "");
+    case "add_question": return "Добавлен вопрос: " + blank(a.template || "");
+    case "restore_version": return "Возвращена версия " + a.version_no + " вопроса: " + blank(a.template || "");
+    default: return l.action + " · " + l.entity;
+  }
+}
+async function tabLog(box) {
+  box.append(el("h2", null, "Журнал изменений"));
+  const [lg, pr] = await Promise.all([
+    sb.from("change_log").select("id, actor_id, action, entity, before, after, reason, created_at").order("created_at", { ascending: false }).limit(100),
+    sb.from("profiles").select("id, display_name")]);
+  if (lg.error) { box.append(note("bad", "Не удалось загрузить: " + errText(lg.error))); return; }
+  const names = {}; (pr.data || []).forEach(p => { names[p.id] = p.display_name; });
+  if (!lg.data.length) { box.append(note("warn", "Записей пока нет.")); return; }
+  lg.data.forEach(l => box.append(el("div", { class: "card", style: "margin-top:0" },
+    el("div", { class: "mut" }, new Date(l.created_at).toLocaleString("ru-RU") + " · " + (names[l.actor_id] || "система")),
+    el("div", null, describeLog(l)))));
+  box.append(el("p", { class: "mut" }, "Показаны последние 100 записей. Вернуть прежнюю версию вопроса можно в редакторе набора: Наборы → Редактировать → История версий."));
 }
 
 // ===== Запуск =====
