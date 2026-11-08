@@ -133,13 +133,13 @@ const VERDICT = { correct: "Correct", partial: "Partly correct", incorrect: "Inc
 function showLogin(mode = "signin", message = null) {
   const email = el("input", { type: "email", autocomplete: "email", required: true });
   const pass = el("input", { type: "password", autocomplete: mode === "signup" ? "new-password" : "current-password", required: true, minlength: 6 });
-  const name = el("input", { type: "text", autocomplete: "name" });
+  const name = el("input", { type: "text", autocomplete: "name", required: true });
   const box = el("div");
   if (message) box.append(message);
   const form = el("form", { class: "card" },
     el("h2", null, mode === "signup" ? "Create account" : "Sign in"),
     el("label", { class: "field" }, el("span", null, "Email"), email),
-    mode === "signup" ? el("label", { class: "field" }, el("span", null, "Your name"), name) : null,
+    mode === "signup" ? el("label", { class: "field" }, el("span", null, "Your name (your teacher will see it)"), name) : null,
     el("label", { class: "field" }, el("span", null, mode === "signup" ? "Password (at least 6 characters)" : "Password"), pass),
     box,
     el("div", { class: "row" },
@@ -198,7 +198,7 @@ async function tabTasks(box) {
   box.append(el("h2", null, "Exercises"));
   const { data, error } = await sb.from("exercises").select("id,title,kind").eq("status", "published").order("created_at");
   if (error) { box.append(note("bad", "Could not load exercises: " + errText(error))); return; }
-  if (!data.length) { box.append(note("warn", "No published exercises yet.")); return; }
+  if (!data.length) { box.append(note("warn", me.role === "teacher" ? "No published exercises yet." : "No exercises have been assigned to you yet.")); return; }
   data.forEach(x => box.append(el("div", { class: "card row", style: "justify-content:space-between;margin-top:0" },
     el("div", null, el("strong", null, x.title), el("div", { class: "mut" }, x.kind === "grammar" ? "Grammar" : "Vocabulary")),
     el("button", { onclick: () => openExercise(x.id) }, "Open"))));
@@ -371,6 +371,25 @@ function reviewCard(ev, result) {
 }
 
 
+
+// ===== Назначение наборов студентам =====
+async function loadStudents() {
+  const { data, error } = await sb.from("profiles").select("id, display_name").eq("role", "student").order("display_name");
+  return error ? [] : (data || []);
+}
+function studentName(s) { return s.display_name || "Unnamed student"; }
+function studentPicker(students, selected) {
+  const boxes = students.map(s => { const cb = el("input", { type: "checkbox", value: s.id }); cb.checked = selected.includes(s.id); return { s, cb }; });
+  const node = el("div", null,
+    students.length
+      ? el("div", { class: "row", style: "margin:.2rem 0 .4rem" },
+          el("button", { type: "button", class: "ghost", onclick: () => boxes.forEach(b => { b.cb.checked = true; }) }, "Select all"),
+          el("button", { type: "button", class: "ghost", onclick: () => boxes.forEach(b => { b.cb.checked = false; }) }, "Clear"))
+      : note("warn", "No students have registered yet."),
+    ...boxes.map(b => el("label", { style: "display:block;font:.95rem system-ui,sans-serif;padding:.2rem 0" }, b.cb, " " + studentName(b.s))));
+  return { node, get: () => boxes.filter(b => b.cb.checked).map(b => b.s.id) };
+}
+
 // ===== Вкладка: наборы (только преподаватель) =====
 const CLAUDE_PROMPT = `Составь набор упражнений на заполнение пропусков и верни ТОЛЬКО JSON в одном блоке кода, без пояснений.
 Формат:
@@ -458,7 +477,7 @@ async function tabSets(box) {
   const copyBtn = el("button", { type: "button", class: "ghost" }, "Copy prompt");
   copyBtn.addEventListener("click", () => copyText(CLAUDE_PROMPT, copyBtn));
   const checkBtn = el("button", { type: "button" }, "Check");
-  checkBtn.addEventListener("click", () => {
+  checkBtn.addEventListener("click", async () => {
     let obj;
     try { obj = parseSet(ta.value); } catch (e) { out.replaceChildren(note("bad", errText(e))); return; }
     const { errors, warnings } = validateSet(obj);
@@ -466,13 +485,26 @@ async function tabSets(box) {
       out.replaceChildren(note("bad", "Please fix:"), el("ul", { class: "plain" }, errors.map(x => el("li", null, x))));
       return;
     }
+    const students = await loadStudents();
+    const titleIn = el("input", { type: "text", maxlength: "120", style: "width:100%", placeholder: "For example: Liza, November, 10" });
+    titleIn.value = obj.title;
+    const picker = studentPicker(students, []);
     const save = el("button", { type: "button" }, "Save as draft");
     save.addEventListener("click", async () => {
+      const title = titleIn.value.trim();
+      if (!title) { out.append(note("bad", "Please enter a title.")); return; }
+      obj.title = title;
       save.disabled = true;
       const { data, error } = await sb.rpc("import_exercise", { p: obj });
       if (error) { save.disabled = false; out.append(note("bad", "Could not save: " + errText(error))); return; }
+      const ids = picker.get();
+      let extra = "";
+      if (ids.length) {
+        const r = await sb.rpc("set_assignments", { p_exercise: data.exercise_id, p_students: ids });
+        extra = r.error ? " The set was saved, but assigning it failed: " + errText(r.error) : " Assigned to " + ids.length + " student(s).";
+      }
       ta.value = "";
-      out.replaceChildren(note("ok", "Saved as draft: “" + obj.title + "”, questions: " + data.questions + "."));
+      out.replaceChildren(note("ok", "Saved as draft: “" + title + "”, questions: " + data.questions + "." + extra));
       loadList();
     });
     out.replaceChildren(
@@ -481,6 +513,8 @@ async function tabSets(box) {
       warnings.length ? el("ul", { class: "plain" }, warnings.map(x => el("li", null, x))) : null,
       el("p", { class: "mut" }, "This is how the questions will look (the main answer is in brackets):"),
       el("ol", { class: "plain" }, previewSet(obj)),
+      el("label", { class: "field" }, el("span", null, "Title (students see it, for example: Liza, November, 10)"), titleIn),
+      el("div", { class: "field" }, el("span", null, "Assign to (optional, you can do it later)"), picker.node),
       el("div", { class: "row" }, save));
   });
   box.append(el("div", { class: "card" },
@@ -494,14 +528,19 @@ async function tabSets(box) {
   const listBox = el("div");
   box.append(el("h2", { style: "margin-top:1.6rem" }, "All sets"), listBox);
   async function loadList() {
-    const { data, error } = await sb.from("exercises").select("id,title,status,questions(count)").order("created_at", { ascending: false });
-    if (error) { listBox.replaceChildren(note("bad", "Could not load: " + errText(error))); return; }
-    if (!data.length) { listBox.replaceChildren(note("warn", "No sets yet.")); return; }
-    listBox.replaceChildren(...data.map(x => setCard(x, loadList)));
+    const [ex, asg, students] = await Promise.all([
+      sb.from("exercises").select("id,title,status,questions(count)").order("created_at", { ascending: false }),
+      sb.from("assignments").select("exercise_id, student_id"),
+      loadStudents()]);
+    if (ex.error) { listBox.replaceChildren(note("bad", "Could not load: " + errText(ex.error))); return; }
+    if (!ex.data.length) { listBox.replaceChildren(note("warn", "No sets yet.")); return; }
+    const byEx = {};
+    (asg.data || []).forEach(a => { (byEx[a.exercise_id] = byEx[a.exercise_id] || []).push(a.student_id); });
+    listBox.replaceChildren(...ex.data.map(x => setCard(x, loadList, students, byEx[x.id] || [])));
   }
   loadList();
 }
-function setCard(x, reload) {
+function setCard(x, reload, students, assigned) {
   const count = x.questions && x.questions[0] ? x.questions[0].count : 0;
   const pub = x.status === "published";
   const msg = el("div");
@@ -528,11 +567,46 @@ function setCard(x, reload) {
     }
   });
   btns.push(act);
+
+  const panel = el("div");
+  const renameBtn = el("button", { type: "button", class: "ghost" }, "Rename");
+  renameBtn.addEventListener("click", () => {
+    const inp = el("input", { type: "text", maxlength: "120", style: "width:100%", "aria-label": "Set title" });
+    inp.value = x.title;
+    const save = el("button", { type: "button" }, "Save");
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      const { error } = await sb.rpc("rename_exercise", { p_exercise: x.id, p_title: inp.value });
+      if (error) { save.disabled = false; msg.replaceChildren(note("bad", "Could not rename: " + errText(error))); return; }
+      reload();
+    });
+    panel.replaceChildren(el("div", { class: "field" }, el("span", null, "Title (for example: Liza, November, 10)"), inp),
+      el("div", { class: "row" }, save, el("button", { type: "button", class: "ghost", onclick: () => panel.replaceChildren() }, "Cancel")));
+    inp.focus();
+  });
+  const assignBtn = el("button", { type: "button", class: "ghost" }, "Assign");
+  assignBtn.addEventListener("click", () => {
+    const picker = studentPicker(students, assigned);
+    const save = el("button", { type: "button" }, "Save");
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      const { error } = await sb.rpc("set_assignments", { p_exercise: x.id, p_students: picker.get() });
+      if (error) { save.disabled = false; msg.replaceChildren(note("bad", "Could not save: " + errText(error))); return; }
+      reload();
+    });
+    panel.replaceChildren(el("div", { class: "field" }, el("span", null, "Students who can see this set"), picker.node),
+      el("div", { class: "row" }, save, el("button", { type: "button", class: "ghost", onclick: () => panel.replaceChildren() }, "Cancel")));
+  });
+  btns.splice(2, 0, renameBtn, assignBtn);
+
+  const names = students.filter(st => assigned.includes(st.id)).map(studentName);
   return el("div", { class: "card" },
     el("strong", null, x.title), " ",
     el("span", { class: "pill " + (pub ? "correct" : "pending") }, pub ? "Published" : "Draft"),
     el("div", { class: "mut" }, "Questions: " + count),
-    el("div", { class: "row" }, btns), msg);
+    el("div", { class: "mut" }, names.length ? "Assigned to: " + names.join(", ") : "Not assigned to any student yet"),
+    pub && !names.length ? note("warn", "This set is published, but no student can see it yet. Use Assign.") : null,
+    el("div", { class: "row" }, btns), panel, msg);
 }
 
 
@@ -729,6 +803,8 @@ function describeLog(l) {
     case "review": return "Decision on a student’s answer: " + (b.verdict ? VERDICT[b.verdict] : "was pending") + " → " + (VERDICT[a.verdict] || a.verdict) + (l.reason ? " (" + l.reason + ")" : "");
     case "edit_question": return "Question edited, version " + a.version_no + ": " + blank(a.template || "");
     case "add_question": return "Question added: " + blank(a.template || "");
+    case "rename_exercise": return "Set renamed: “" + (b.title || "") + "” → “" + (a.title || "") + "”";
+    case "assign": return "Set “" + (a.title || "") + "” assigned to " + ((a.students || []).length) + " student(s)";
     case "restore_version": return "Restored version " + a.version_no + " of the question: " + blank(a.template || "");
     default: return l.action + " · " + l.entity;
   }
