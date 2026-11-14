@@ -52,6 +52,8 @@ th{color:var(--mut);font-weight:600}
 .kpi span{font:.8rem system-ui,sans-serif;color:var(--mut)}
 .words{font-size:1.1rem;line-height:1.9;margin:.2rem 0 1rem}
 .hero{display:block;width:100%;height:auto;border-radius:10px;border:1px solid var(--line);margin-bottom:1rem}
+button.danger{color:var(--bad);border-color:var(--bad)}
+button.danger-solid{background:var(--bad);border-color:var(--bad);color:#fff}
 .badge{font:.75rem system-ui,sans-serif;border:1px solid var(--line);border-radius:99px;padding:.05rem .5rem;margin-left:.4rem}
 </style>
 </head>
@@ -201,7 +203,7 @@ function showHome(tab = "tasks") {
 // ===== Вкладка: задания =====
 async function tabTasks(box) {
   box.append(el("h2", null, "Exercises"));
-  const { data, error } = await sb.from("exercises").select("id,title,kind").eq("status", "published").order("created_at");
+  const { data, error } = await sb.from("exercises").select("id,title,kind").eq("status", "published").is("archived_at", null).order("created_at");
   if (error) { box.append(note("bad", "Could not load exercises: " + errText(error))); return; }
   if (!data.length) { box.append(note("warn", me.role === "teacher" ? "No published exercises yet." : "No exercises have been assigned to you yet.")); return; }
   data.forEach(x => box.append(el("div", { class: "card row", style: "justify-content:space-between;margin-top:0" },
@@ -533,17 +535,34 @@ async function tabSets(box) {
   const listBox = el("div");
   box.append(el("h2", { style: "margin-top:1.6rem" }, "All sets"), listBox);
   async function loadList() {
-    const [ex, asg, students] = await Promise.all([
-      sb.from("exercises").select("id,title,status,questions(count)").order("created_at", { ascending: false }),
+    const [ex, asg, students, arch] = await Promise.all([
+      sb.from("exercises").select("id,title,status,questions(count)").is("archived_at", null).order("created_at", { ascending: false }),
       sb.from("assignments").select("exercise_id, student_id"),
-      loadStudents()]);
+      loadStudents(),
+      sb.from("exercises").select("id,title").not("archived_at", "is", null).order("title")]);
     if (ex.error) { listBox.replaceChildren(note("bad", "Could not load: " + errText(ex.error))); return; }
-    if (!ex.data.length) { listBox.replaceChildren(note("warn", "No sets yet.")); return; }
     const byEx = {};
     (asg.data || []).forEach(a => { (byEx[a.exercise_id] = byEx[a.exercise_id] || []).push(a.student_id); });
-    listBox.replaceChildren(...ex.data.map(x => setCard(x, loadList, students, byEx[x.id] || [])));
+    const cards = ex.data.length ? ex.data.map(x => setCard(x, loadList, students, byEx[x.id] || [])) : [note("warn", "No sets yet.")];
+    const archived = arch && arch.data ? arch.data : [];
+    const archBlock = archived.length ? el("details", null,
+      el("summary", null, "Archived sets (" + archived.length + ")"),
+      el("p", { class: "mut" }, "Archived sets are hidden from students. Their results and statistics are kept."),
+      ...archived.map(a => archivedCard(a, loadList))) : null;
+    listBox.replaceChildren(...cards, archBlock);
   }
   loadList();
+}
+function archivedCard(a, reload) {
+  const msg = el("div");
+  const b = el("button", { type: "button", class: "ghost" }, "Restore");
+  b.addEventListener("click", async () => {
+    b.disabled = true;
+    const { error } = await sb.rpc("archive_exercise", { p_exercise: a.id, p_archived: false });
+    if (error) { b.disabled = false; msg.replaceChildren(note("bad", "Could not restore: " + errText(error))); return; }
+    reload();
+  });
+  return el("div", { class: "card" }, el("strong", null, a.title), el("div", { class: "row" }, b), msg);
 }
 function setCard(x, reload, students, assigned) {
   const count = x.questions && x.questions[0] ? x.questions[0].count : 0;
@@ -603,6 +622,39 @@ function setCard(x, reload, students, assigned) {
       el("div", { class: "row" }, save, el("button", { type: "button", class: "ghost", onclick: () => panel.replaceChildren() }, "Cancel")));
   });
   btns.splice(2, 0, renameBtn, assignBtn);
+
+  const delBtn = el("button", { type: "button", class: "ghost danger" }, "Delete");
+  delBtn.addEventListener("click", async () => {
+    delBtn.disabled = true;
+    const chk = await sb.rpc("delete_exercise", { p_exercise: x.id, p_check: true });
+    delBtn.disabled = false;
+    if (chk.error) { msg.replaceChildren(note("bad", "Could not check: " + errText(chk.error))); return; }
+    const cancel = el("button", { type: "button", class: "ghost", onclick: () => panel.replaceChildren() }, "Cancel");
+    if (chk.data.student_answers > 0) {
+      const arch = el("button", { type: "button" }, "Archive instead");
+      arch.addEventListener("click", async () => {
+        arch.disabled = true;
+        const r = await sb.rpc("archive_exercise", { p_exercise: x.id, p_archived: true });
+        if (r.error) { arch.disabled = false; msg.replaceChildren(note("bad", "Could not archive: " + errText(r.error))); return; }
+        reload();
+      });
+      panel.replaceChildren(
+        note("warn", "Students have already given " + chk.data.student_answers + " answer(s) in this set. Deleting it would erase their results, so it cannot be deleted. You can archive it instead: it disappears from the lists and students can no longer open it, but all results and statistics are kept."),
+        el("div", { class: "row" }, arch, cancel));
+      return;
+    }
+    const go = el("button", { type: "button", class: "danger-solid" }, "Delete permanently");
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      const r = await sb.rpc("delete_exercise", { p_exercise: x.id, p_check: false });
+      if (r.error || !r.data.deleted) { go.disabled = false; msg.replaceChildren(note("bad", "Could not delete: " + (r.error ? errText(r.error) : "the set now has student answers"))); return; }
+      reload();
+    });
+    panel.replaceChildren(
+      note("bad", "Delete “" + x.title + "” permanently? Its questions and assignments will be removed. This cannot be undone."),
+      el("div", { class: "row" }, go, cancel));
+  });
+  btns.push(delBtn);
 
   const names = students.filter(st => assigned.includes(st.id)).map(studentName);
   return el("div", { class: "card" },
@@ -808,6 +860,9 @@ function describeLog(l) {
     case "review": return "Decision on a student’s answer: " + (b.verdict ? VERDICT[b.verdict] : "was pending") + " → " + (VERDICT[a.verdict] || a.verdict) + (l.reason ? " (" + l.reason + ")" : "");
     case "edit_question": return "Question edited, version " + a.version_no + ": " + blank(a.template || "");
     case "add_question": return "Question added: " + blank(a.template || "");
+    case "delete_exercise": return "Set deleted: “" + (b.title || "") + "”, questions: " + (b.questions || 0);
+    case "archive_exercise": return "Set archived: “" + (a.title || "") + "”";
+    case "unarchive_exercise": return "Set restored from the archive: “" + (a.title || "") + "”";
     case "rename_exercise": return "Set renamed: “" + (b.title || "") + "” → “" + (a.title || "") + "”";
     case "assign": return "Set “" + (a.title || "") + "” assigned to " + ((a.students || []).length) + " student(s)";
     case "restore_version": return "Restored version " + a.version_no + " of the question: " + blank(a.template || "");
