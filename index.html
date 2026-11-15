@@ -107,6 +107,7 @@ const SERVER_MSG = {
   "Попытка не найдена": "Attempt not found",
   "Попытка уже завершена": "This attempt is already finished",
   "Доступно только преподавателю": "Teacher access only",
+  "Студент не найден": "Student not found",
   "В задании есть вопрос без версии": "The exercise contains a question without a version",
   "В задании нет вопросов": "The exercise has no questions"
 };
@@ -185,9 +186,9 @@ function renderTop() {
           el("button", { class: "ghost", onclick: () => sb.auth.signOut() }, "Sign out")) : null);
 }
 function showHome(tab = "tasks") {
-  document.getElementById("app").style.maxWidth = tab === "stats" ? "62rem" : "";
+  document.getElementById("app").style.maxWidth = tab === "stats" || tab === "students" ? "62rem" : "";
   const tabs = [["tasks", "Exercises"], ["due", "Review"]];
-  if (me.role === "teacher") tabs.push(["review", "Disputed answers"], ["sets", "Sets"], ["stats", "Statistics"], ["log", "Log"]);
+  if (me.role === "teacher") tabs.push(["review", "Disputed answers"], ["sets", "Sets"], ["students", "Students"], ["stats", "Statistics"], ["log", "Log"]);
   const body = el("div");
   const nav = el("div", { class: "tabs" }, tabs.map(([id, label]) =>
     el("button", { class: id === tab ? "on ghost" : "ghost", onclick: () => showHome(id) }, label)));
@@ -196,6 +197,7 @@ function showHome(tab = "tasks") {
   else if (tab === "due") tabDue(body);
   else if (tab === "review") tabReview(body);
   else if (tab === "sets") tabSets(body);
+  else if (tab === "students") tabStudents(body);
   else if (tab === "stats") tabStats(body);
   else tabLog(body);
 }
@@ -881,6 +883,132 @@ async function tabLog(box) {
     el("div", { class: "mut" }, new Date(l.created_at).toLocaleString("en-GB") + " · " + (names[l.actor_id] || "system")),
     el("div", null, describeLog(l)))));
   box.append(el("p", { class: "mut" }, "The last 100 entries are shown. You can restore an earlier version of a question in the set editor: Sets → Edit set → Edit → Version history."));
+}
+
+
+// ===== Вкладка: студенты и карточка студента (только преподаватель) =====
+function fmtDT(iso) {
+  return iso ? new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+}
+function th(...labels) { return el("thead", null, el("tr", null, labels.map(h => el("th", null, h)))); }
+function tableCard(head, rows) { return el("div", { class: "card scroll", style: "padding:.3rem" }, el("table", null, head, el("tbody", null, rows))); }
+
+async function tabStudents(box) {
+  box.append(el("h2", null, "Students"));
+  const body = el("div", null, el("p", { class: "mut" }, "Loading…"));
+  box.append(body);
+  const [st, asg] = await Promise.all([sb.rpc("stats_students"), sb.from("assignments").select("student_id")]);
+  if (st.error) { body.replaceChildren(note("bad", "Could not load: " + errText(st.error))); return; }
+  if (!st.data.length) { body.replaceChildren(note("warn", "No students have registered yet.")); return; }
+  const counts = {};
+  (asg.data || []).forEach(a => { counts[a.student_id] = (counts[a.student_id] || 0) + 1; });
+  const rows = st.data.map(x => {
+    const a = ago(x.last_active);
+    return el("tr", null,
+      el("td", null, el("button", { type: "button", class: "ghost", onclick: () => showStudent(x.id) }, x.name)),
+      el("td", null, a.text),
+      el("td", null, String(counts[x.id] || 0)),
+      el("td", null, String(x.answers_total)),
+      el("td", null, x.accuracy == null ? "—" : x.accuracy + "%"),
+      el("td", null, x.overdue > 0 ? el("span", { class: "pill incorrect" }, String(x.overdue)) : "0"));
+  });
+  body.replaceChildren(
+    tableCard(th("Student", "Last active", "Assigned sets", "Answers", "Correct", "Overdue"), rows),
+    el("p", { class: "mut" }, "Click a name to see that student’s sets, results, answers and review schedule."));
+}
+
+async function showStudent(id) {
+  mount(el("p", { class: "mut" }, "Loading…"));
+  const back = el("div", { class: "row", style: "margin:0 0 .8rem" },
+    el("button", { type: "button", class: "ghost", onclick: () => showHome("students") }, "← Back to students"));
+  const { data: d, error } = await sb.rpc("student_report", { p_student: id });
+  if (error) { mount(back, note("bad", "Could not load: " + errText(error))); return; }
+  const sm = d.summary, sc = d.schedule_counts, last = ago(sm.last_active);
+
+  const header = [
+    el("h2", null, d.profile.name),
+    el("p", { class: "mut" }, "Registered: " + fmtDate(String(d.profile.joined).slice(0, 10)) + " · Last active: " + last.text),
+    el("div", { class: "kpis" },
+      kpi(sm.answers_total, "answers in total"),
+      kpi(sm.answers_7d, "answers in 7 days"),
+      kpi(sm.accuracy == null ? "—" : sm.accuracy + "%", "correct"),
+      kpi(sm.pending, "awaiting your review"),
+      kpi(d.assigned.length, "sets assigned"),
+      kpi(sc.mastered + " / " + sc.learning + " / " + sc.overdue, "mastered / in progress / overdue")),
+    sm.pending > 0 ? note("warn", "Some of this student’s answers are awaiting review: open the “Disputed answers” tab.") : null];
+
+  // назначенные наборы
+  const assignedRows = d.assigned.map(a => el("tr", null,
+    el("td", null, el("strong", null, a.title), " ",
+      el("span", { class: "pill " + (a.archived ? "incorrect" : a.status === "published" ? "correct" : "pending") }, a.archived ? "Archived" : a.status === "published" ? "Published" : "Draft")),
+    el("td", null, String(a.questions)),
+    el("td", null, String(a.attempts)),
+    el("td", null, a.last_attempt ? fmtDT(a.last_attempt) : "not started"),
+    el("td", null, String(a.answers)),
+    el("td", null, a.accuracy == null ? "—" : a.accuracy + "%")));
+  const assignedSec = [el("h2", { style: "margin-top:1.4rem" }, "Assigned sets"),
+    d.assigned.length ? tableCard(th("Set", "Questions", "Attempts", "Last attempt", "Answers", "Correct"), assignedRows)
+                      : note("warn", "No sets are assigned to this student yet.")];
+
+  // ответы и фильтры
+  const state = { attempt: null, mistakes: false };
+  const answersBox = el("div");
+  function renderAnswers() {
+    let list = d.answers;
+    if (state.attempt) list = list.filter(a => a.attempt_id === state.attempt);
+    if (state.mistakes) list = list.filter(a => a.verdict !== "correct");
+    const att = state.attempt ? d.attempts.find(a => a.id === state.attempt) : null;
+    const mist = el("input", { type: "checkbox" }); mist.checked = state.mistakes;
+    mist.addEventListener("change", () => { state.mistakes = mist.checked; renderAnswers(); });
+    const bar = el("div", { class: "row", style: "margin:.2rem 0 .8rem" },
+      el("label", { style: "font:.95rem system-ui,sans-serif" }, mist, " Mistakes and pending only"),
+      att ? el("span", { class: "pill pending" }, "Attempt: " + fmtDT(att.started_at)) : null,
+      att ? el("button", { type: "button", class: "ghost", onclick: () => { state.attempt = null; renderAnswers(); } }, "Show all attempts") : null);
+    const cards = list.length ? list.map(a => el("div", { class: "card", style: "margin-top:0" },
+        el("div", { class: "mut" }, fmtDT(a.created_at) + " · " + a.exercise + (a.expression ? " · " + a.expression : "")),
+        el("div", { class: "sentence", style: "line-height:1.6;margin:.2rem 0" }, fill(a.template, a.answers)),
+        el("div", null, el("span", { class: "pill " + a.verdict }, VERDICT[a.verdict] || a.verdict),
+          a.source === "teacher" ? el("span", { class: "mut" }, "  decided by you") : null),
+        a.verdict !== "correct" && a.expected ? el("div", { class: "mut" }, "Expected: " + a.expected.join(" / ")) : null))
+      : [note("warn", d.answers.length ? "No answers match the filter." : "This student has not answered anything yet.")];
+    answersBox.replaceChildren(bar, ...cards,
+      d.answers.length >= 150 ? el("p", { class: "mut" }, "Showing the latest 150 answers.") : null);
+  }
+  renderAnswers();
+
+  // результаты (попытки)
+  const attemptRows = d.attempts.map(a => {
+    const unfinished = !a.finished_at && a.answered < a.total;
+    const show = el("button", { type: "button", class: "ghost", onclick: () => {
+      state.attempt = a.id; renderAnswers();
+      if (answersBox.scrollIntoView) answersBox.scrollIntoView({ behavior: "smooth", block: "start" });
+    } }, "Show answers");
+    return el("tr", null,
+      el("td", null, fmtDT(a.started_at)),
+      el("td", null, a.kind === "review" ? "Review session" : (a.exercise || "—")),
+      el("td", null, String(+a.score) + " of " + a.total),
+      el("td", null, a.answered + " answered" + (unfinished ? " (not finished)" : "")),
+      el("td", null, a.pending > 0 ? el("span", { class: "pill pending" }, String(a.pending)) : "0"),
+      el("td", null, a.answered > 0 ? show : "—"));
+  });
+  const resultsSec = [el("h2", { style: "margin-top:1.4rem" }, "Results"),
+    d.attempts.length ? tableCard(th("Started", "Exercise", "Score", "Progress", "Awaiting review", ""), attemptRows)
+                      : note("warn", "No attempts yet."),
+    d.attempts.length >= 40 ? el("p", { class: "mut" }, "Showing the latest 40 attempts.") : null];
+
+  // расписание повторений
+  const scheduleRows = d.schedule.map(x => el("tr", null,
+    el("td", null, el("strong", null, x.phrase)),
+    el("td", null, x.meaning || "—"),
+    el("td", null, x.level + " of 5"),
+    el("td", null, fmtDate(x.next_review)),
+    el("td", null, x.overdue ? el("span", { class: "pill incorrect" }, "overdue") : "")));
+  const scheduleSec = [el("h2", { style: "margin-top:1.4rem" }, "Review schedule"),
+    d.schedule.length ? tableCard(th("Expression", "Meaning", "Level", "Next review", ""), scheduleRows)
+                      : note("warn", "No expressions in the schedule yet.")];
+
+  mount(back, ...header, ...assignedSec, ...resultsSec, ...scheduleSec,
+    el("h2", { style: "margin-top:1.4rem" }, "Answers"), answersBox);
 }
 
 // ===== Запуск =====
