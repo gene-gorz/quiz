@@ -108,6 +108,7 @@ const SERVER_MSG = {
   "Попытка уже завершена": "This attempt is already finished",
   "Доступно только преподавателю": "Teacher access only",
   "Студент не найден": "Student not found",
+  "Ссылка недействительна": "This link is no longer valid. Please ask your teacher for a new one.",
   "В задании есть вопрос без версии": "The exercise contains a question without a version",
   "В задании нет вопросов": "The exercise has no questions"
 };
@@ -182,7 +183,7 @@ function renderTop() {
   top.replaceChildren(
     el("span", { class: "brand" }, "Siberian English with Gene"),
     me ? el("span", { class: "who" }, me.name,
-          el("span", { class: "badge" }, me.role === "teacher" ? "teacher" : "student"), " ",
+          el("span", { class: "badge" }, me.role === "teacher" ? "teacher" : me.role === "guest" ? "guest" : "student"), " ",
           el("button", { class: "ghost", onclick: () => sb.auth.signOut() }, "Sign out")) : null);
 }
 function showHome(tab = "tasks") {
@@ -301,7 +302,11 @@ async function finishQuiz() {
     el("h2", null, "Result: " + data.score + " out of " + data.total),
     data.pending ? note("warn", "Answers awaiting teacher review: " + data.pending + ". Your result may change.") : null,
     ...items,
-    el("div", { class: "row" }, el("button", { onclick: () => showHome(quiz.back || "tasks") }, quiz.back === "due" ? "Back to review" : "Back to exercises")));
+    quiz.back === "guest"
+      ? el("div", { class: "row" },
+          el("button", { type: "button", onclick: () => startGuest(quiz.token) }, "Try again"),
+          me && me.role === "guest" ? el("button", { type: "button", class: "ghost", onclick: () => leaveGuest("signup") }, "Create an account") : null)
+      : el("div", { class: "row" }, el("button", { onclick: () => showHome(quiz.back || "tasks") }, quiz.back === "due" ? "Back to review" : "Back to exercises")));
 }
 
 // ===== Вкладка: к повторению =====
@@ -536,16 +541,34 @@ async function tabSets(box) {
   // --- список наборов ---
   const listBox = el("div");
   box.append(el("h2", { style: "margin-top:1.6rem" }, "All sets"), listBox);
+  const cleanMsg = el("div");
+  const cleanBtn = el("button", { type: "button", class: "ghost" }, "Delete old guest data");
+  cleanBtn.addEventListener("click", async () => {
+    cleanBtn.disabled = true;
+    const { data, error } = await sb.rpc("cleanup_guests", { p_days: 7 });
+    cleanBtn.disabled = false;
+    if (error) { cleanMsg.replaceChildren(note("bad", "Could not clean up: " + errText(error))); return; }
+    cleanMsg.replaceChildren(note("ok", "Deleted guest sessions older than 7 days: " + data.deleted + "."));
+    loadList();
+  });
+  box.append(el("div", { class: "card", style: "margin-top:1.2rem" },
+    el("strong", null, "Guest data"),
+    el("p", { class: "mut" }, "Guests are not shown in Students or Statistics. Delete guest sessions and their answers older than 7 days now and then to keep the database tidy."),
+    el("div", { class: "row" }, cleanBtn), cleanMsg));
   async function loadList() {
-    const [ex, asg, students, arch] = await Promise.all([
+    const [ex, asg, students, arch, gl, ga] = await Promise.all([
       sb.from("exercises").select("id,title,status,questions(count)").is("archived_at", null).order("created_at", { ascending: false }),
       sb.from("assignments").select("exercise_id, student_id"),
       loadStudents(),
-      sb.from("exercises").select("id,title").not("archived_at", "is", null).order("title")]);
+      sb.from("exercises").select("id,title").not("archived_at", "is", null).order("title"),
+      sb.from("guest_links").select("exercise_id, token"),
+      sb.from("attempts").select("exercise_id, profiles!inner(role)").eq("profiles.role", "guest")]);
     if (ex.error) { listBox.replaceChildren(note("bad", "Could not load: " + errText(ex.error))); return; }
     const byEx = {};
     (asg.data || []).forEach(a => { (byEx[a.exercise_id] = byEx[a.exercise_id] || []).push(a.student_id); });
-    const cards = ex.data.length ? ex.data.map(x => setCard(x, loadList, students, byEx[x.id] || [])) : [note("warn", "No sets yet.")];
+    const tokens = {}; ((gl && gl.data) || []).forEach(g => { tokens[g.exercise_id] = g.token; });
+    const gcount = {}; ((ga && ga.data) || []).forEach(g => { gcount[g.exercise_id] = (gcount[g.exercise_id] || 0) + 1; });
+    const cards = ex.data.length ? ex.data.map(x => setCard(x, loadList, students, byEx[x.id] || [], { token: tokens[x.id] || null, attempts: gcount[x.id] || 0 })) : [note("warn", "No sets yet.")];
     const archived = arch && arch.data ? arch.data : [];
     const archBlock = archived.length ? el("details", null,
       el("summary", null, "Archived sets (" + archived.length + ")"),
@@ -566,7 +589,7 @@ function archivedCard(a, reload) {
   });
   return el("div", { class: "card" }, el("strong", null, a.title), el("div", { class: "row" }, b), msg);
 }
-function setCard(x, reload, students, assigned) {
+function setCard(x, reload, students, assigned, guest) {
   const count = x.questions && x.questions[0] ? x.questions[0].count : 0;
   const pub = x.status === "published";
   const msg = el("div");
@@ -658,13 +681,51 @@ function setCard(x, reload, students, assigned) {
   });
   btns.push(delBtn);
 
+  const guestBtn = el("button", { type: "button", class: "ghost" }, "Guest link");
+  function guestPanel() {
+    const act = async (enabled, regenerate) => {
+      const { data, error } = await sb.rpc("set_guest_link", { p_exercise: x.id, p_enabled: enabled, p_regenerate: !!regenerate });
+      if (error) { msg.replaceChildren(note("bad", "Could not change the guest link: " + errText(error))); return; }
+      guest.token = data.token;
+      guestPanel();
+    };
+    const close = el("button", { type: "button", class: "ghost", onclick: () => panel.replaceChildren() }, "Close");
+    if (!guest.token) {
+      panel.replaceChildren(
+        el("p", { class: "mut" }, "A guest link lets anyone do this set without registering. Guests see their result at the end, but nothing is saved to an account, a review schedule or your statistics."),
+        pub ? null : note("warn", "The set is a draft: the link will work only after you publish it."),
+        el("div", { class: "row" }, el("button", { type: "button", onclick: () => act(true, false) }, "Create guest link"), close));
+      return;
+    }
+    const url = location.origin + location.pathname + "#guest=" + guest.token;
+    const inp = el("input", { type: "text", readonly: "true", style: "width:100%", "aria-label": "Guest link" });
+    inp.value = url;
+    const copy = el("button", { type: "button" }, "Copy link");
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(url); copy.textContent = "Copied"; }
+      catch (e) { inp.select(); copy.textContent = "Press Ctrl+C"; }
+      setTimeout(() => { copy.textContent = "Copy link"; }, 2000);
+    });
+    panel.replaceChildren(
+      el("div", { class: "field" }, el("span", null, "Guest link (anyone who has it can do this set)"), inp),
+      pub ? null : note("warn", "The set is a draft: the link will work only after you publish it."),
+      el("p", { class: "mut" }, "Guest attempts so far: " + guest.attempts),
+      el("div", { class: "row" }, copy,
+        el("button", { type: "button", class: "ghost", onclick: () => act(true, true) }, "Create a new link"),
+        el("button", { type: "button", class: "ghost danger", onclick: () => act(false, false) }, "Turn off"), close),
+      el("p", { class: "mut" }, "“Create a new link” stops the old link from working."));
+  }
+  guestBtn.addEventListener("click", guestPanel);
+  btns.splice(3, 0, guestBtn);
+
   const names = students.filter(st => assigned.includes(st.id)).map(studentName);
   return el("div", { class: "card" },
     el("strong", null, x.title), " ",
     el("span", { class: "pill " + (pub ? "correct" : "pending") }, pub ? "Published" : "Draft"),
     el("div", { class: "mut" }, "Questions: " + count),
     el("div", { class: "mut" }, names.length ? "Assigned to: " + names.join(", ") : "Not assigned to any student yet"),
-    pub && !names.length ? note("warn", "This set is published, but no student can see it yet. Use Assign.") : null,
+    guest.token ? el("div", { class: "mut" }, "Guest link: on · guest attempts: " + guest.attempts) : null,
+    pub && !names.length && !guest.token ? note("warn", "This set is published, but no student can see it yet. Use Assign.") : null,
     el("div", { class: "row" }, btns), panel, msg);
 }
 
@@ -865,6 +926,9 @@ function describeLog(l) {
     case "delete_exercise": return "Set deleted: “" + (b.title || "") + "”, questions: " + (b.questions || 0);
     case "archive_exercise": return "Set archived: “" + (a.title || "") + "”";
     case "unarchive_exercise": return "Set restored from the archive: “" + (a.title || "") + "”";
+    case "guest_link_on": return "Guest link created for the set “" + (a.title || "") + "”";
+    case "guest_link_off": return "Guest link turned off for the set “" + (a.title || "") + "”";
+    case "cleanup_guests": return "Old guest data deleted: " + (a.deleted || 0) + " guest session(s)";
     case "rename_exercise": return "Set renamed: “" + (b.title || "") + "” → “" + (a.title || "") + "”";
     case "assign": return "Set “" + (a.title || "") + "” assigned to " + ((a.students || []).length) + " student(s)";
     case "restore_version": return "Restored version " + a.version_no + " of the question: " + blank(a.template || "");
@@ -1011,21 +1075,87 @@ async function showStudent(id) {
     el("h2", { style: "margin-top:1.4rem" }, "Answers"), answersBox);
 }
 
+// ===== Гостевой доступ по ссылке =====
+let guestBusy = false;
+let guestUid = null;      // идентификатор гостя, вошедшего анонимно в этой вкладке
+function guestToken() { const m = /(?:^|[#&])guest=([A-Za-z0-9]+)/.exec(location.hash); return m ? m[1] : null; }
+async function leaveGuest(mode) {
+  guestUid = null;
+  history.replaceState(null, "", location.pathname + location.search);
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) { await sb.auth.signOut(); }     // слушатель покажет страницу входа
+  else showLogin(mode || "signin");
+}
+function guestErr(e) {
+  const m = errText(e);
+  return /anonymous/i.test(m) ? "guest access is not switched on yet. Please ask your teacher." : m;
+}
+async function showGuestLanding(token) {
+  mount(el("p", { class: "mut" }, "Loading…"));
+  const { data, error } = await sb.rpc("guest_lookup", { p_token: token });
+  if (error) {
+    mount(note("bad", errText(error)), el("div", { class: "row" }, el("button", { type: "button", onclick: () => leaveGuest("signin") }, "Sign in")));
+    return;
+  }
+  const words = data.words || [];
+  mount(
+    el("h2", null, data.title),
+    el("div", { class: "card" },
+      el("p", { class: "mut" }, (data.kind === "grammar" ? "Grammar" : "Vocabulary") + " · " + data.questions + (data.questions === 1 ? " question" : " questions")),
+      words.length ? el("div", null, el("div", { class: "mut" }, "Words and expressions in this exercise"), el("p", { class: "words" }, words.join(" · "))) : null,
+      me && me.role !== "guest" ? null : note("warn", "You are trying this exercise as a guest. Your result is shown at the end but is not saved. Create an account if you want to keep your progress."),
+      el("div", { class: "row" },
+        el("button", { type: "button", onclick: () => startGuest(token) }, "Start"),
+        me && me.role !== "guest" ? null : el("button", { type: "button", class: "ghost", onclick: () => leaveGuest("signup") }, "Create an account"),
+        me && me.role !== "guest" ? null : el("button", { type: "button", class: "ghost", onclick: () => leaveGuest("signin") }, "Sign in"))));
+}
+async function startGuest(token) {
+  mount(el("p", { class: "mut" }, "Preparing the exercise…"));
+  guestBusy = true;
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    let activeSession = session;
+    if (!activeSession) {
+      const r = await sb.auth.signInAnonymously();
+      if (r.error) throw r.error;
+      activeSession = r.data && r.data.session;
+      guestUid = activeSession && activeSession.user ? activeSession.user.id : null;
+    }
+    const { data, error } = await sb.rpc("start_guest_attempt", { p_token: token });
+    if (error) throw error;
+    await loadMe(activeSession);
+    quiz = { attempt: data.attempt_id, mode: data.show_answers, qs: data.questions, i: 0, back: "guest", token };
+    showQuestion();
+  } catch (e) {
+    mount(note("bad", "Could not start the exercise: " + guestErr(e)),
+      el("button", { type: "button", onclick: () => showGuestLanding(token) }, "Back"));
+  } finally { guestBusy = false; }
+}
+
 // ===== Запуск =====
 let lastUid;
 sb.auth.onAuthStateChange((event, session) => {
   const uid = session && session.user ? session.user.id : null;
   if (uid === lastUid) return;           // не перезапускать при возврате на вкладку
   lastUid = uid;
+  if (guestBusy || (guestUid && uid === guestUid)) return;   // вход гостя: страницу не перерисовываем
   setTimeout(boot, 0);
 });
+async function loadMe(session) {
+  if (!session || !session.user) { me = null; renderTop(); return; }
+  const { data: p } = await sb.from("profiles").select("display_name, role").eq("id", session.user.id).single();
+  me = { id: session.user.id, name: (p && p.display_name) || session.user.email || "Guest", role: (p && p.role) || "student" };
+  renderTop();
+}
 async function boot() {
+  guestUid = null;
   document.getElementById("app").style.maxWidth = "";
   const { data: { session } } = await sb.auth.getSession();
-  if (!session) { me = null; quiz = null; renderTop(); showLogin(); return; }
-  const { data: p } = await sb.from("profiles").select("display_name, role").eq("id", session.user.id).single();
-  me = { id: session.user.id, name: (p && p.display_name) || session.user.email, role: (p && p.role) || "student" };
-  renderTop();
+  const token = guestToken();
+  if (!session) { me = null; quiz = null; renderTop(); if (token) showGuestLanding(token); else showLogin(); return; }
+  await loadMe(session);
+  if (token) { showGuestLanding(token); return; }
+  if (me.role === "guest") { await sb.auth.signOut(); return; }   // гостевой сеанс без ссылки: на страницу входа
   showHome("tasks");
 }
 </script>
